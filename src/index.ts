@@ -16,6 +16,7 @@ type State = {
 
 export class Session extends DurableObject<Env> {
   storage = this.ctx.storage
+  sql = this.storage.sql
 
   async sayHello(name: string): Promise<string> {
     return `Hello, ${name}!`
@@ -27,6 +28,14 @@ export class Session extends DurableObject<Env> {
       user_name: 'Glen Maddern', //todo: parameterise
       home_locale: 'Melbourne/Australia',
     })
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `)
   }
 
   async onMessage(message: string) {
@@ -38,8 +47,21 @@ export class Session extends DurableObject<Env> {
       throw new Error(`wtf mate?`)
     }
 
+    const history = this.sql
+      .exec(
+        `
+          SELECT role, content
+          FROM history
+          ORDER BY created_at ASC;
+        `,
+      )
+      .toArray()
+
+    console.log({ history })
+
     const messages = [
       { role: 'system', content: await this.#getSystemPrompt() },
+      ...history,
       { role: 'user', content: message },
     ]
 
@@ -49,7 +71,10 @@ export class Session extends DurableObject<Env> {
     })
     console.log({ response })
 
-    return 'response' in response ? response.response : response
+    const unwrapped = 'response' in response ? response.response : response
+    this.sql.exec(`INSERT INTO history (role, content) values ('user', ?), ('assistant',?);`, message, unwrapped)
+
+    return unwrapped
   }
 
   async #getSystemPrompt() {
