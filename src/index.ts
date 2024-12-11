@@ -1,65 +1,176 @@
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers'
+// import { authorizer, createSubjects } from '@openauthjs/openauth';
+// import { CloudflareStorage } from '@openauthjs/openauth/storage/cloudflare';
+// import { PasswordAdapter } from '@openauthjs/openauth/adapter/password';
+// import { PasswordUI } from '@openauthjs/openauth/ui/password';
+// import { object, set, string } from 'valibot';
+import CLAUDE_SYSTEM_PROMPT from './system-prompt.txt'
 
-/**
- * Welcome to Cloudflare Workers! This is your first Durable Objects application.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your Durable Object in action
- * - Run `npm run deploy` to publish your application
- *
- * Bind resources to your worker in `wrangler.toml`. After adding bindings, a type definition for the
- * `Env` object can be regenerated with `npm run cf-typegen`.
- *
- * Learn more at https://developers.cloudflare.com/durable-objects
- */
+const CURRENT_SESSION = 'CURRENT_SESSION'
 
-/** A Durable Object's behavior is defined in an exported Javascript class */
-export class MyDurableObject extends DurableObject {
-	/**
-	 * The constructor is invoked once upon creation of the Durable Object, i.e. the first call to
-	 * 	`DurableObjectStub::get` for a given identifier (no-op constructors can be omitted)
-	 *
-	 * @param ctx - The interface for interacting with Durable Object state
-	 * @param env - The interface to reference bindings declared in wrangler.toml
-	 */
-	constructor(ctx: DurableObjectState, env: Env) {
-		super(ctx, env);
-	}
-
-	/**
-	 * The Durable Object exposes an RPC method sayHello which will be invoked when when a Durable
-	 *  Object instance receives a request from a Worker via the same method invocation on the stub
-	 *
-	 * @param name - The name provided to a Durable Object instance from a Worker
-	 * @returns The greeting to be sent back to the Worker
-	 */
-	async sayHello(name: string): Promise<string> {
-		return `Hello, ${name}!`;
-	}
+type State = {
+  session_created_at: string
+  user_name: string
+  home_locale: string
 }
 
-export default {
-	/**
-	 * This is the standard fetch handler for a Cloudflare Worker
-	 *
-	 * @param request - The request submitted to the Worker from the client
-	 * @param env - The interface to reference bindings declared in wrangler.toml
-	 * @param ctx - The execution context of the Worker
-	 * @returns The response to be sent back to the client
-	 */
-	async fetch(request, env, ctx): Promise<Response> {
-		// We will create a `DurableObjectId` using the pathname from the Worker request
-		// This id refers to a unique instance of our 'MyDurableObject' class above
-		let id: DurableObjectId = env.MY_DURABLE_OBJECT.idFromName(new URL(request.url).pathname);
+export class Session extends DurableObject<Env> {
+  storage = this.ctx.storage
 
-		// This stub creates a communication channel with the Durable Object instance
-		// The Durable Object constructor will be invoked upon the first call for a given id
-		let stub = env.MY_DURABLE_OBJECT.get(id);
+  async sayHello(name: string): Promise<string> {
+    return `Hello, ${name}!`
+  }
 
-		// We call the `sayHello()` RPC method on the stub to invoke the method on the remote
-		// Durable Object instance
-		let greeting = await stub.sayHello("world");
+  async init() {
+    this.storage.put<State>('state', {
+      session_created_at: new Date().toString(),
+      user_name: 'Glen Maddern', //todo: parameterise
+      home_locale: 'Melbourne/Australia',
+    })
+  }
 
-		return new Response(greeting);
-	},
-} satisfies ExportedHandler<Env>;
+  async onMessage(message: string) {
+    console.log({ message })
+    if (message === 'debug') {
+      return `\`${JSON.stringify(await this.storage.get('state'))}\``
+    }
+    if (message === 'throw') {
+      throw new Error(`wtf mate?`)
+    }
+
+    const messages = [
+      { role: 'system', content: await this.#getSystemPrompt() },
+      { role: 'user', content: message },
+    ]
+
+    const response = await this.env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
+      messages,
+      // stream: true,
+    })
+    console.log({ response })
+
+    return 'response' in response ? response.response : response
+  }
+
+  async #getSystemPrompt() {
+    const { session_created_at, user_name, home_locale } = (await this.storage.get<State>('state')) || {}
+    return [
+      CLAUDE_SYSTEM_PROMPT.replace(`{{currentDateTime}}`, new Date().toString())
+        .replace(/Claude/g, 'Flaude')
+        .replace(/Anthropic/g, 'GMadthropic'),
+      `For context, you are talking to ${user_name}, who normally resides in ${home_locale}. This conversation started at ${session_created_at}.`,
+    ].join('\n\n')
+  }
+}
+
+export default class Stub404 extends WorkerEntrypoint<Env> {
+  async fetch() {
+    // await this.env.GCHAT_ROOM.sendMessage("Wow, I just sent a message from a Worker to Google Chat!!")
+    // return new Response('XAB! It works!');
+
+    return new Response(null, { status: 404 })
+  }
+}
+
+export class ChatEvents extends WorkerEntrypoint<Env> {
+  async onMessage(message: string) {
+    console.log({ message, env: Object.keys(this.env) })
+    const { FlaudeStorage: KV, SESSIONS: DO } = this.env
+
+    if (message === 'clear') {
+      return '-' + new Array(64).fill('\n').join('') + '-'
+    }
+
+    if (message === 'new session') {
+      const id = DO.newUniqueId()
+      await DO.get(id).init()
+      const sessionID = id.toString()
+
+      await KV.put(CURRENT_SESSION, sessionID)
+      return `Created session \`${sessionID}\` and switched to it.`
+    }
+
+    const setSession = message.match(/^set session (\w+)\s*$/)
+    if (setSession) {
+      const sessionID = setSession[1]
+      await KV.put(CURRENT_SESSION, sessionID)
+      return `Switched to session \`${sessionID}\`.`
+    }
+
+    const currentSession = await KV.get(CURRENT_SESSION)
+
+    if (message === 'end session') {
+      await KV.delete(CURRENT_SESSION)
+      return `Ended session${currentSession ? ' `' + currentSession + '`' : ''}.`
+    }
+
+    if (!currentSession) {
+      return `No current session!`
+    }
+
+    try {
+      const stub = DO.get(DO.idFromString(currentSession))
+      const response = await stub.onMessage(message)
+      console.log({ response })
+      return response
+    } catch (e) {
+      return `⚠️ ERROR: ${(e as Error).message} [${JSON.stringify((e as Error).stack)}]`
+    }
+  }
+}
+
+// export default {
+// 	async fetch(request, env): Promise<Response> {
+//
+// 		const messages = [
+// 			{ role: "system", content: "You are a friendly assistant" },
+// 			{
+// 				role: "user",
+// 				content: "What is the origin of the phrase Hello, World",
+// 			},
+// 		];
+//
+// 		const stream = await env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+// 			messages,
+// 			stream: true,
+// 		});
+//
+// 		return new Response(stream, {
+// 			headers: { "content-type": "text/event-stream" },
+// 		});
+// 	},
+// } satisfies ExportedHandler<Env>;
+
+// export const subjects = createSubjects({
+// 	user: object({
+// 		email: string(),
+// 	}),
+// })
+//
+// export default {
+// 	async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+// 		return authorizer({
+// 			storage: CloudflareStorage({
+// 				namespace: env.CloudflareAuthKV,
+// 			}),
+// 			subjects,
+// 			providers: {
+// 				password: PasswordAdapter(
+// 					PasswordUI({
+// 						sendCode: async (email, code) => {
+// 							console.log(email, code)
+// 						},
+// 					}),
+// 				),
+// 			},
+// 			success: async (ctx, value) => {
+// 				if (value.provider === "password") {
+// 					return ctx.subject("user", {
+// 						email: value.email,
+// 					})
+// 				}
+// 				throw new Error("Invalid provider")
+// 			},
+// 		}).fetch(request, env, ctx)
+// 	},
+// }

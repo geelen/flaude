@@ -1,5 +1,5 @@
 {
-  "name": "fraude",
+  "name": "flaude",
   "version": "0.0.0",
   "private": true,
   "scripts": {
@@ -10,7 +10,10 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241205.0",
+    "@openauthjs/openauth": "^0.0.22",
+    "prettier": "^3.4.2",
     "typescript": "^5.5.2",
-    "wrangler": "^3.60.3"
+    "valibot": "1.0.0-beta.9",
+    "wrangler": "0.0.0-69bab223d"
   }
 }

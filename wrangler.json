@@ -1,0 +1,43 @@
+{
+	"compatibility_date": "2024-12-05",
+	"compatibility_flags": ["nodejs_compat"],
+	"main": "src/index.ts",
+	"name": "flaude",
+	"migrations": [
+		{
+			"new_sqlite_classes": [
+				"Session"
+			],
+			"tag": "v2"
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "Session",
+				"name": "SESSIONS"
+			}
+		]
+	},
+	"ai": {
+		"binding": "AI"
+	},
+	"observability": {
+		"enabled": true
+	},
+	"kv_namespaces": [
+		{
+			"binding": "CloudflareAuthKV",
+			"id": "542869c17b314dcdaa02dfd54459ee76"
+		},
+		{
+			"binding": "FlaudeStorage",
+			"id": "d4844d745f9447719d7d500abf4ac7c2"
+		}
+	],
+	"services": [{
+		"binding": "GCHAT_ROOM",
+		"service": "connection:gchat:user:glen_maddern",
+		"entrypoint": "room"
+	}]
+}
